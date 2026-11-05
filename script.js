@@ -26,16 +26,81 @@
   function openDetail(id){const item=state.items.find(i=>i.id===id);if(!item)return;state.currentDetail=id;const metadata=[];if(item.mode==='anime'){if(item.season){const n=Number(item.season);metadata.push(Number.isFinite(n)&&n>0?(n===1?'1 Season':`${n} Seasons`):String(item.season));}if(item.hasMovies&&item.movieCount)metadata.push('Movies: '+item.movieCount)}if(item.mode==='manga'&&item.chapters!=null)metadata.push('Chapters: '+item.chapters);metadata.push('Status: '+item.status);if(item.status==='completed'&&item.finishedDate)metadata.push('Finished: '+item.finishedDate);$('detailContent').innerHTML=`<div class="detail-banner">${item.image?`<img src="${safe(item.image)}" alt="">`:''}</div><div class="detail-body"><img class="detail-poster" src="${safe(item.image||'')}" alt="${safe(item.title)}" onerror="this.style.opacity=0"><div class="detail-info"><span class="eyebrow">${safe(modeNames[item.mode].toUpperCase())}</span><h2>${safe(item.title)}</h2><div class="detail-tags">${(item.genres||[]).map(g=>`<span class="detail-tag">${safe(g)}</span>`).join('')}</div><div class="detail-meta">${metadata.map(x=>`<span>${safe(x)}</span>`).join('')}</div><p class="detail-summary">${safe(item.summary||'No summary added yet.')}</p><div class="detail-actions">${item.status==='planned'?'<button class="primary-btn" id="finishDetail">✓ Mark finished</button>':''}<button class="secondary-btn" id="editDetail">Edit</button><button class="secondary-btn" id="spotDetail">${item.spotlight?'★ Remove Spotlight':'☆ Add Spotlight'}</button><button class="danger-btn" id="deleteDetail">Delete</button></div></div></div>`;$('detailBackdrop').hidden=false}
   function finishItem(id){const item=state.items.find(i=>i.id===id);if(!item)return;const date=new Date().toISOString().slice(0,10);item.status='completed';item.finishedDate=date;save();closeModal('detailBackdrop');render();toast('Moved to Completed.')}
   let suggestTimer=null, suggestController=null;
-  async function searchExternal(query){
-    if(query.trim().length<2)return [];
-    if(suggestController)suggestController.abort();suggestController=new AbortController();
-    if(state.mode==='anime'||state.mode==='manga'){
-      const type=state.mode==='anime'?'anime':'manga';const r=await fetch(`https://api.jikan.moe/v4/${type}?q=${encodeURIComponent(query)}&limit=7&sfw=true`,{signal:suggestController.signal});if(!r.ok)throw new Error('Search service is busy');const j=await r.json();return (j.data||[]).map(x=>({id:x.mal_id,title:x.title_english||x.title,image:x.images?.jpg?.large_image_url||x.images?.jpg?.image_url,summary:x.synopsis||'',genres:(x.genres||[]).map(g=>g.name),year:x.year||x.aired?.prop?.from?.year,seasons:null,source:'jikan'}));
-    }
-    const r=await fetch(`https://en.wikipedia.org/w/api.php?action= opensearch&search=${encodeURIComponent(query)}&limit=7&namespace=0&format=json&origin=*`.replace('action= opensearch','action=opensearch'),{signal:suggestController.signal});if(!r.ok)throw new Error('Movie search is unavailable');const j=await r.json();return (j[1]||[]).map((title,n)=>({id:title,title,image:'',summary:j[2]?.[n]||'',url:j[3]?.[n]||'',source:'wiki'}));
+  
+async function searchExternal(query) {
+  if (query.trim().length < 2) return [];
+
+  if (suggestController) suggestController.abort();
+  suggestController = new AbortController();
+
+  if (state.mode === 'anime' || state.mode === 'manga') {
+    const type = state.mode === 'anime' ? 'ANIME' : 'MANGA';
+
+    const graphqlQuery = `
+      query ($search: String, $type: MediaType) {
+        Page(perPage: 7) {
+          media(search: $search, type: $type, isAdult: false) {
+            id
+            title { english romaji }
+            coverImage { large }
+            description(asHtml: false)
+            genres
+            seasonYear
+            episodes
+          }
+        }
+      }
+    `;
+
+    const response = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        query: graphqlQuery,
+        variables: { search: query, type }
+      }),
+      signal: suggestController.signal
+    });
+
+    if (!response.ok) throw new Error('AniList service is busy. Try again.');
+
+    const result = await response.json();
+
+    return (result.data?.Page?.media || []).map(x => ({
+      id: x.id,
+      title: x.title.english || x.title.romaji,
+      image: x.coverImage?.large || '',
+      summary: (x.description || '').replace(/<[^>]*>/g, ''),
+      genres: x.genres || [],
+      year: x.seasonYear,
+      seasons: null,
+      source: 'anilist'
+    }));
   }
-  function renderSuggestions(items){const box=$('titleSuggestions');box.innerHTML=items.map((x,n)=>`<button type="button" class="suggestion" data-suggestion="${n}">${x.image?`<img src="${safe(x.image)}" alt="" loading="lazy">`:'<span class="suggestion-placeholder">✦</span>'}<span><strong>${safe(x.title)}</strong><small>${safe((x.summary||'').slice(0,90)||'Select to load details')}</small></span></button>`).join('');box.hidden=!items.length;box._items=items;}
-  async function chooseSuggestion(item){$('titleSuggestions').hidden=true;$('titleInput').value=item.title;if(item.source==='jikan'){$('imageInput').value=item.image||'';$('summaryInput').value=(item.summary||'').replace(/\[.*?\]/g,'').trim();state.draftGenres=[...new Set((item.genres||[]).map(g=>GENRES.find(x=>x.toLowerCase()===g.toLowerCase())||g))];if(state.mode==='anime')$('seasonInput').value='';}else{try{const r=await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(item.title)}`);if(r.ok){const d=await r.json();$('summaryInput').value=d.extract||item.summary;$('imageInput').value=d.thumbnail?.source||'';}}catch{} }renderGenreChips('formGenres',state.draftGenres,'form');$('fetchMessage').textContent='Details filled in. Review before saving.';toast('Details added.');}
+
+  const r = await fetch(
+    `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=7&namespace=0&format=json&origin=*`,
+    { signal: suggestController.signal }
+  );
+
+  if (!r.ok) throw new Error('Movie search is unavailable');
+
+  const j = await r.json();
+
+  return (j[1] || []).map((title, n) => ({
+    id: title,
+    title,
+    image: '',
+    summary: j[2]?.[n] || '',
+    url: j[3]?.[n] || '',
+    source: 'wiki'
+  }));
+}
+{const box=$('titleSuggestions');box.innerHTML=items.map((x,n)=>`<button type="button" class="suggestion" data-suggestion="${n}">${x.image?`<img src="${safe(x.image)}" alt="" loading="lazy">`:'<span class="suggestion-placeholder">✦</span>'}<span><strong>${safe(x.title)}</strong><small>${safe((x.summary||'').slice(0,90)||'Select to load details')}</small></span></button>`).join('');box.hidden=!items.length;box._items=items;}
+  async function chooseSuggestion(item){$('titleSuggestions').hidden=true;$('titleInput').value=item.title;if(item.source==='anilist'){$('imageInput').value=item.image||'';$('summaryInput').value=(item.summary||'').replace(/\[.*?\]/g,'').trim();state.draftGenres=[...new Set((item.genres||[]).map(g=>GENRES.find(x=>x.toLowerCase()===g.toLowerCase())||g))];if(state.mode==='anime')$('seasonInput').value='';}else{try{const r=await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(item.title)}`);if(r.ok){const d=await r.json();$('summaryInput').value=d.extract||item.summary;$('imageInput').value=d.thumbnail?.source||'';}}catch{} }renderGenreChips('formGenres',state.draftGenres,'form');$('fetchMessage').textContent='Details filled in. Review before saving.';toast('Details added.');}
   async function fetchDetails(){const title=$('titleInput').value.trim();if(!title){toast('Enter a title first.');return}$('fetchBtn').disabled=true;$('fetchBtn').textContent='Searching…';$('fetchMessage').textContent='Finding matching titles…';try{const items=await searchExternal(title);if(!items.length)throw new Error('No matching title found');if(items.length>1){renderSuggestions(items);$('fetchMessage').textContent='Choose the correct match below.';}else await chooseSuggestion(items[0]);}catch(err){if(err.name!=='AbortError'){$('fetchMessage').textContent=err.message;toast('Could not fetch details. Try again.')}}finally{$('fetchBtn').disabled=false;$('fetchBtn').textContent='Fetch details'}}
   function openSearch(){$('searchOverlay').hidden=false;$('librarySearch').focus();renderSearchResults($('librarySearch').value)}function closeSearch(){$('searchOverlay').hidden=true}
   function renderSearchResults(q){const list=state.items.filter(i=>!q||i.title.toLowerCase().includes(q.toLowerCase())).slice(0,30);$('librarySearchResults').innerHTML=list.length?list.map(i=>`<button class="library-result" data-result="${safe(i.id)}">${i.image?`<img src="${safe(i.image)}" alt="" loading="lazy">`:'<span class="suggestion-placeholder">✦</span>'}<span><strong>${safe(i.title)}</strong><small>${safe(modeNames[i.mode])} · ${safe(i.status)}</small></span></button>`).join(''):`<p class="search-hint">${q?'No matching titles in your library.':'Your library search is ready.'}</p>`}
